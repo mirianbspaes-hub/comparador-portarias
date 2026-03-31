@@ -27,8 +27,8 @@ def extrair_texto_pdf(pdf):
 def gerar_word_com_estilo(texto_ia):
     """
     Transforma o Markdown da IA em formatação profissional do Word.
-    ~~texto~~ -> Riscado e Vermelho (Antigo)
-    **texto** -> Negrito e Azul Escuro (Novo)
+    ~~texto~~ -> Riscado e Vermelho (Texto antigo/excluído)
+    **texto** -> Negrito e Azul Escuro (Texto novo/incluído)
     """
     doc = Document()
     style = doc.styles['Normal']
@@ -38,30 +38,29 @@ def gerar_word_com_estilo(texto_ia):
     for linha in texto_ia.split('\n'):
         linha = linha.strip()
         if not linha:
-            # Adiciona espaço entre parágrafos, como no modelo
-            doc.add_paragraph()
+            doc.add_paragraph() # Espaço entre parágrafos
             continue
             
         p = doc.add_paragraph()
         
-        # Regex para capturar os marcadores de alteração
+        # Regex para identificar os marcadores de alteração da IA
         partes = re.split(r'(~~.*?~~|\*\*.*?\*\*)', linha)
         
         for parte in partes:
             if parte.startswith('~~') and parte.endswith('~~'):
-                # FORMATO: REMOVIDO (Riscado + Vermelho)
+                # FORMATO: REMOVIDO/ALTERADO (Riscado + Vermelho)
                 texto_limpo = parte.replace('~~', '')
                 run = p.add_run(texto_limpo)
                 run.font.strike = True
                 run.font.color.rgb = RGBColor(200, 0, 0)
             elif parte.startswith('**') and parte.endswith('**'):
-                # FORMATO: INCLUÍDO (Negrito + Azul)
+                # FORMATO: NOVO (Negrito + Azul)
                 texto_limpo = parte.replace('**', '')
                 run = p.add_run(texto_limpo)
                 run.bold = True
                 run.font.color.rgb = RGBColor(0, 51, 102)
             else:
-                # FORMATO: TEXTO NORMAL/MANUTENÇÃO
+                # TEXTO QUE PERMANECE IGUAL
                 p.add_run(parte)
                 
     buffer = io.BytesIO()
@@ -69,26 +68,24 @@ def gerar_word_com_estilo(texto_ia):
     buffer.seek(0)
     return buffer
 
-def processar_comparacao_ia(t1, t2, tipo_doc):
+def processar_comparacao_ia(texto_base, texto_alteracoes):
     """
-    Envia para a IA com instruções de consolidação normativa.
+    Instrução crucial: O Texto 1 é a BASE INTEGRAL. O Texto 2 são apenas os comandos de mudança.
     """
-    if tipo_doc == "Portaria + Alterações":
-        contexto_adicional = "O Segundo Texto contém apenas as alterações que devem ser aplicadas sobre o Primeiro Texto."
-    else:
-        contexto_adicional = "Compare os dois textos completos e identifique as diferenças entre eles."
-
-    prompt_sistema = f"""
-    Você é um especialista em Consolidação Normativa Jurídica.
-    Sua missão é criar um documento único que mostre a evolução do texto.
     
-    REGRAS DE OURO:
-    1. JAMAIS liste o texto original completo e depois o alterado.
-    2. A comparação deve ser ITEM POR ITEM (Artigo, Parágrafo, Inciso).
-    3. Se algo mudou: coloque a redação antiga usando ~~texto antigo~~ e, IMEDIATAMENTE ABAIXO, a nova redação usando **nova redação**.
-    4. Se algo é novo: use **texto novo** e adicione (Incluído pela Portaria nº X).
-    5. Se algo foi excluído: use ~~texto antigo~~ e adicione (Revogado pela Portaria nº X).
-    6. Não resuma. Mantenha a literalidade jurídica.
+    prompt_sistema = """
+    Você é um especialista em Consolidação Normativa Jurídica.
+    
+    SUA TAREFA:
+    Você deve pegar o 'TEXTO 1 (BASE INTEGRAL)' e usá-lo como o corpo principal do documento. 
+    Você percorrerá o TEXTO 1 e, somente onde o 'TEXTO 2 (ALTERAÇÕES)' indicar uma mudança, você aplicará a alteração no local exato.
+    
+    REGRAS DE FORMATAÇÃO:
+    1. NÃO SUPRIMA NADA do Texto 1 que não tenha sido expressamente alterado. O resultado final deve ser a Portaria completa.
+    2. Onde houver ALTERAÇÃO: coloque o texto original do Texto 1 riscado como ~~texto antigo~~ e, logo abaixo, a nova redação em negrito como **texto novo**.
+    3. Onde houver INCLUSÃO: insira o novo parágrafo/artigo no local correto em negrito **texto novo**.
+    4. Ao final de cada alteração, adicione a nota de rodapé jurídica (ex: Redação dada pela Portaria nº X).
+    5. Mantenha a estrutura original de Artigos, Parágrafos, Incisos e Alíneas.
     """
 
     try:
@@ -96,7 +93,7 @@ def processar_comparacao_ia(t1, t2, tipo_doc):
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": prompt_sistema},
-                {"role": "user", "content": f"{contexto_adicional}\n\nTEXTO 1 (BASE):\n{t1[:15000]}\n\nTEXTO 2 (ALTERAÇÕES):\n{t2[:15000]}"}
+                {"role": "user", "content": f"TEXTO 1 (BASE INTEGRAL QUE DEVE SER MANTIDA):\n{texto_base[:15000]}\n\nTEXTO 2 (SOMENTE AS ALTERAÇÕES A APLICAR):\n{texto_alteracoes[:10000]}"}
             ],
             temperature=0
         )
@@ -109,51 +106,41 @@ def processar_comparacao_ia(t1, t2, tipo_doc):
 # =========================
 
 st.set_page_config(page_title="Comparador SAT - MTE", layout="wide")
-st.title("⚖️ Sistema de Consolidação de Portarias")
-st.info("Este app gera automaticamente um Word com textos riscados e novas redações destacadas.")
+st.title("⚖️ Consolidador de Portarias (Base Integral)")
+
+st.warning("⚠️ O sistema usará o primeiro PDF como base completa e aplicará as mudanças contidas no segundo PDF.")
 
 col1, col2 = st.columns(2)
 with col1:
-    pdf_base = st.file_uploader("1. Carregar Portaria Original (PDF)", type="pdf")
+    pdf_base = st.file_uploader("1. Carregar Portaria ANTIGA COMPLETA (Base)", type="pdf")
 with col2:
-    pdf_alt = st.file_uploader("2. Carregar Documento com Alterações (PDF)", type="pdf")
+    pdf_alt = st.file_uploader("2. Carregar Documento de ALTERAÇÕES (Texto Novo)", type="pdf")
 
-tipo_analise = st.radio(
-    "Tipo de Documento:",
-    ["Portaria + Alterações", "Comparação direta (2 textos completos)"],
-    horizontal=True
-)
-
-if st.button("🚀 Gerar Documento Word Comparado"):
+if st.button("🚀 Gerar Portaria Consolidada"):
     if not pdf_base or not pdf_alt:
-        st.warning("Por favor, faça o upload dos dois arquivos PDF para continuar.")
+        st.error("Upload obrigatório dos dois arquivos.")
     elif not client:
-        st.error("Erro: API Key da OpenAI não configurada.")
+        st.error("API Key não configurada.")
     else:
-        with st.spinner("Analisando textos e aplicando regras jurídicas..."):
-            # Passo 1: Extração
-            texto_base = extrair_texto_pdf(pdf_base)
-            texto_alt = extrair_texto_pdf(pdf_alt)
+        with st.spinner("Consolidando textos..."):
+            t_base = extrair_texto_pdf(pdf_base)
+            t_alt = extrair_texto_pdf(pdf_alt)
             
-            # Passo 2: Inteligência de Comparação
-            resultado_ia = processar_comparacao_ia(texto_base, texto_alt, tipo_analise)
+            # Chama a função que trata o Texto 1 como soberano/base
+            resultado_ia = processar_comparacao_ia(t_base, t_alt)
             
             if "Erro" in resultado_ia:
                 st.error(resultado_ia)
             else:
-                # Passo 3: Geração do Word formatado
                 arquivo_docx = gerar_word_com_estilo(resultado_ia)
+                st.success("✅ Portaria consolidada com sucesso!")
                 
-                st.success("✅ Documento gerado com sucesso!")
-                
-                # Botão de Download
                 st.download_button(
-                    label="📥 Baixar Portaria_Comparada_Atualizada.docx",
+                    label="📥 Baixar Portaria_Consolidada.docx",
                     data=arquivo_docx,
-                    file_name="Portaria_Comparada_Atualizada.docx",
+                    file_name="Portaria_Consolidada.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 )
                 
-                # Prévia Visual
-                with st.expander("Visualizar alterações detectadas (Resumo)"):
-                    st.markdown(resultado_ia.replace('~~', '~~').replace('**', '**'))
+                with st.expander("Prévia das Alterações"):
+                    st.write(resultado_ia)
