@@ -2,32 +2,27 @@ import streamlit as st
 import pdfplumber
 import re
 import time
-from docx import Document
-from docx.shared import Pt
+import io
 import os
+from docx import Document
+from docx.shared import Pt, RGBColor
 from openai import OpenAI
 
 # =========================
 # CONFIG IA
 # =========================
 api_key = os.getenv("OPENAI_API_KEY")
-
-if api_key:
-    client = OpenAI(api_key=api_key)
-    IA_ATIVA = True
-else:
-    IA_ATIVA = False
+client = OpenAI(api_key=api_key) if api_key else None
 
 # =========================
 # CONFIG STREAMLIT
 # =========================
-st.set_page_config(page_title="Comparador de Portarias")
-
-st.title("📄 Comparador Profissional de Portarias")
-st.write("Envie dois PDFs e gere automaticamente a versão comparada.")
+st.set_page_config(page_title="Comparador de Portarias", layout="wide")
+st.title("⚖️ Comparador Profissional de Portarias")
+st.write("Geração automática de comparativo jurídico com IA.")
 
 # =========================
-# FUNÇÕES
+# FUNÇÕES DE TEXTO E WORD
 # =========================
 
 def extrair_texto(pdf):
@@ -37,213 +32,114 @@ def extrair_texto(pdf):
             texto += (page.extract_text() or "") + "\n"
     return texto
 
-
-def extrair_blocos_juridicos(texto):
-    padrao = r"(Art\. ?\d+º?|§ ?\d+º?|[IVXLC]+\s?-|[a-z]\)|[0-9]+\.[0-9\.]+)"
-    partes = re.split(padrao, texto)
-    blocos = {}
-
-    for i in range(1, len(partes), 2):
-        chave = partes[i].strip()
-        conteudo = partes[i+1].strip() if i+1 < len(partes) else ""
-        blocos[chave] = conteudo
-
-    return blocos
-
-
-def extrair_alteracoes(texto):
-    alteracoes = {}
-
-    padrao = r"Art\. ?(\d+)º?.*?passa a vigorar com a seguinte redação:(.*?)(?=Art\.|\Z)"
-    matches = re.findall(padrao, texto, re.DOTALL)
-
-    for num, novo_texto in matches:
-        chave = f"Art. {num}"
-        alteracoes[chave] = novo_texto.strip()
-
-    return alteracoes
-
-
-def aplicar_alteracoes(blocos_originais, alteracoes):
-    for chave, novo_texto in alteracoes.items():
-        blocos_originais[chave] = novo_texto
-    return blocos_originais
-
-
-def comparar_juridico(b1, b2):
-    resultado = []
-    chaves = sorted(set(b1.keys()).union(b2.keys()))
-
-    for c in chaves:
-        t1 = b1.get(c, "").strip()
-        t2 = b2.get(c, "").strip()
-
-        if t1 == t2:
-            resultado.append(("igual", c, t1))
-        elif t1 and not t2:
-            resultado.append(("removido", c, t1))
-        elif not t1 and t2:
-            resultado.append(("adicionado", c, t2))
-        else:
-            resultado.append(("alterado", c, t1, t2))
-
-    return resultado
-
-
-def gerar_docx_oficial(resultado):
+def criar_docx_da_ia(texto_ia):
+    """Converte o texto da IA (com markdown) para um documento Word formatado."""
     doc = Document()
-
+    
+    # Configuração de Estilo Padrão (Times New Roman 12)
     style = doc.styles['Normal']
     font = style.font
     font.name = 'Times New Roman'
     font.size = Pt(12)
 
-    for item in resultado:
-        tipo = item[0]
-
-        if tipo == "igual":
-            chave, texto = item[1], item[2]
-            doc.add_paragraph(f"{chave} {texto}")
-
-        elif tipo == "removido":
-            chave, texto = item[1], item[2]
-            p = doc.add_paragraph()
-            r = p.add_run(f"{chave} {texto}")
-            r.font.strike = True
-
-        elif tipo == "adicionado":
-            chave, texto = item[1], item[2]
-            p = doc.add_paragraph()
-            r = p.add_run(f"{chave} {texto}")
-            r.bold = True
-
-        elif tipo == "alterado":
-            chave, antigo, novo = item[1], item[2], item[3]
-
-            p1 = doc.add_paragraph()
-            r1 = p1.add_run(f"{chave} {antigo}")
-            r1.font.strike = True
-
-            p2 = doc.add_paragraph()
-            r2 = p2.add_run(f"{chave} {novo}")
-            r2.bold = True
-
-    caminho = "Portaria_Comparada_Oficial.docx"
-    doc.save(caminho)
-    return caminho
-
-
-def comparar_com_ia_refinada(t1, t2):
-
-    if not IA_ATIVA:
-        return "❌ IA não configurada."
-
-    prompt = f"""
-Você é especialista em legislação brasileira.
-
-Compare os textos abaixo seguindo RIGOROSAMENTE:
-
-- NÃO resumir
-- NÃO reescrever juridicamente
-- NÃO alterar conteúdo
-- NÃO omitir trechos
-
-Faça:
-
-1. Manter estrutura (Art., §, incisos)
-2. Texto antigo riscado (~~texto~~)
-3. Texto novo abaixo
-4. Inclusões destacadas
-5. Exclusões riscadas
-
-Objetivo:
-Gerar versão consolidada estilo Diário Oficial.
-
-TEXTO ORIGINAL:
-{t1}
-
-TEXTO ALTERADO:
-{t2}
-"""
-
-    for tentativa in range(3):
-        try:
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0
-            )
-            return resp.choices[0].message.content
-
-        except Exception as e:
-            if "RateLimit" in str(e):
-                time.sleep(2 * (tentativa + 1))
+    linhas = texto_ia.split('\n')
+    for linha in linhas:
+        if not linha.strip():
+            continue
+            
+        p = doc.add_paragraph()
+        
+        # Lógica para identificar texto riscado (~~texto~~) vindo da IA
+        partes = re.split(r'(~~.*?~~)', linha)
+        
+        for parte in partes:
+            if parte.startswith('~~') and parte.endswith('~~'):
+                conteudo = parte.replace('~~', '')
+                run = p.add_run(conteudo)
+                run.font.strike = True
+                run.font.color.rgb = RGBColor(200, 0, 0) # Vermelho para removido
             else:
-                return f"Erro: {e}"
+                run = p.add_run(parte)
+                # Se a linha parecer ser uma inclusão (pode-se ajustar o prompt da IA para marcar)
+                if "(Redação dada por" in linha or "Incluído pela" in linha:
+                    run.font.color.rgb = RGBColor(0, 50, 150) # Azul para referência legal
+                
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
 
-    return "❌ Muitas requisições. Tente novamente."
+def comparar_com_ia(t1, t2, tipo_doc):
+    contexto = "Comparação integral de dois textos." if tipo_doc == "Comparação direta (2 textos completos)" else "Aplicação de novas redações sobre uma portaria original."
+    
+    prompt = f"""
+    Você é um especialista em redação oficial e consolidação normativa.
+    Tarefa: {contexto}
+    
+    REGRAS DE FORMATAÇÃO:
+    1. Se um artigo/parágrafo foi alterado: Exiba o texto antigo totalmente riscado usando ~~texto antigo~~. 
+    Logo abaixo, exiba o texto novo em sua forma normal.
+    2. Se foi incluído: Exiba o texto novo e adicione ao final '(Incluído pela Portaria nº X)'.
+    3. Se foi revogado: Exiba o texto antigo riscado ~~texto antigo~~ e adicione '(Revogado pela Portaria nº X)'.
+    4. Mantenha a estrutura: Art., §, incisos, alíneas.
+    
+    TEXTO 1 (ORIGINAL):
+    {t1}
+    
+    TEXTO 2 (ALTERADOR/NOVO):
+    {t2}
+    
+    Retorne apenas o texto comparado, sem comentários extras.
+    """
 
+    resp = client.chat.completions.create(
+        model="gpt-4o", # Recomendado para precisão jurídica
+        messages=[{"role": "system", "content": "Você é um assistente jurídico de alta precisão."},
+                  {"role": "user", "content": prompt}],
+        temperature=0
+    )
+    return resp.choices[0].message.content
 
 # =========================
-# INTERFACE
+# INTERFACE DO USUÁRIO
 # =========================
-pdf1 = st.file_uploader("📥 PDF ORIGINAL", type="pdf")
-pdf2 = st.file_uploader("📥 PDF ALTERADO", type="pdf")
 
-modo_ia = st.radio("Modo:", ["Normal", "IA (mais preciso)"])
+col1, col2 = st.columns(2)
+with col1:
+    pdf_orig = st.file_uploader("📥 PDF ORIGINAL", type="pdf")
+with col2:
+    pdf_alt = st.file_uploader("📥 PDF ALTERADOR", type="pdf")
 
 tipo_doc = st.radio("Tipo de documento:", [
-    "Comparação direta (2 textos completos)",
+    "Comparação direta (2 textos completos)", 
     "Portaria + Alterações"
 ])
 
-# =========================
-# EXECUÇÃO
-# =========================
-if st.button("🚀 Gerar comparação"):
-
-    if pdf1 and pdf2:
-
-        t1 = extrair_texto(pdf1)
-        t2 = extrair_texto(pdf2)
-
-        # =========================
-        # MODO IA
-        # =========================
-        if modo_ia == "IA (mais preciso)":
-            resultado = comparar_com_ia_refinada(t1, t2)
-            st.text_area("Resultado IA", resultado, height=400)
-
-        # =========================
-        # MODO NORMAL
-        # =========================
-        else:
-
-            if tipo_doc == "Comparação direta (2 textos completos)":
-
-                b1 = extrair_blocos_juridicos(t1)
-                b2 = extrair_blocos_juridicos(t2)
-                resultado = comparar_juridico(b1, b2)
-
-            else:
-
-                blocos_originais = extrair_blocos_juridicos(t1)
-                alteracoes = extrair_alteracoes(t2)
-
-                blocos_novos = aplicar_alteracoes(
-                    blocos_originais.copy(),
-                    alteracoes
-                )
-
-                resultado = comparar_juridico(
-                    blocos_originais,
-                    blocos_novos
-                )
-
-            arquivo = gerar_docx_oficial(resultado)
-
-            with open(arquivo, "rb") as f:
-                st.download_button("📄 Baixar Word", f, file_name=arquivo)
-
+if st.button("🚀 Processar e Gerar Word Automático"):
+    if not pdf_orig or not pdf_alt:
+        st.warning("Por favor, envie ambos os arquivos.")
+    elif not client:
+        st.error("Chave da API não encontrada nas variáveis de ambiente.")
     else:
-        st.warning("Envie os dois PDFs.")
+        with st.spinner("Analisando documentos com IA..."):
+            # 1. Extração
+            texto_1 = extrair_texto(pdf_orig)
+            texto_2 = extrair_texto(pdf_alt)
+            
+            # 2. Comparação via IA
+            resultado_texto = comparar_com_ia(texto_1, texto_2, tipo_doc)
+            
+            # 3. Geração do Word
+            arquivo_word = criar_docx_da_ia(resultado_texto)
+            
+            st.success("✅ Comparação concluída!")
+            
+            # 4. Área de Visualização e Download
+            st.text_area("Prévia do Resultado:", resultado_texto, height=300)
+            
+            st.download_button(
+                label="📄 Baixar Portaria Comparada (.docx)",
+                data=arquivo_word,
+                file_name="Portaria_Comparada_Atualizada.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
