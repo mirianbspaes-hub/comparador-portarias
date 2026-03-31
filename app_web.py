@@ -16,6 +16,18 @@ client = OpenAI(api_key=api_key) if api_key else None
 # =========================
 # EXTRAÇÃO
 # =========================
+def limpar_reticencias(texto):
+    # remove linhas compostas só por pontos
+    texto = re.sub(r"\.{5,}", "", texto)
+
+    # remove linhas com muitos pontos e espaços
+    texto = re.sub(r"(\.\s*){5,}", "", texto)
+
+    # remove linhas vazias geradas
+    texto = "\n".join([l for l in texto.split("\n") if l.strip() != ""])
+
+    return texto
+
 def extrair_texto_pdf(pdf):
     texto = ""
     with pdfplumber.open(pdf) as p:
@@ -83,6 +95,10 @@ def comparar_por_blocos(t_base, t_alt):
         st.error("❌ Configure a chave da OpenAI no Secrets.")
         return ""
 
+    # limpar reticências antes de tudo
+    t_base = limpar_reticencias(t_base)
+    t_alt = limpar_reticencias(t_alt)
+
     blocos = dividir_texto(t_base)
 
     if len(blocos) > 20:
@@ -113,6 +129,7 @@ REGRAS OBRIGATÓRIAS:
 - NÃO reescrever juridicamente
 - NÃO resumir
 - NÃO alterar estrutura (Art., §, incisos)
+- Trechos com "....." indicam continuidade e NÃO são alteração
 
 FORMATAÇÃO:
 - Texto removido: ~~texto~~
