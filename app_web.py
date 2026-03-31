@@ -145,20 +145,24 @@ TEXTO ALTERADO:
 {t2}
 """
 
-    if not IA_ATIVA:
-        return "❌ IA não configurada. Adicione sua chave da OpenAI."
+     # 🔁 retry automático (evita RateLimit)
+    for tentativa in range(3):
+        try:
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",  # 🔥 mais estável e barato
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0
+            )
 
-    prompt = f"""
-    (seu prompt aqui)
-    """
+            return resp.choices[0].message.content
 
-    resp = client.chat.completions.create(
-        model="gpt-5",
-        messages=[{"role": "user", "content": prompt}]
-    )
+        except Exception as e:
+            if "RateLimit" in str(e):
+                time.sleep(2 * (tentativa + 1))
+            else:
+                return f"Erro: {e}"
 
-    return resp.choices[0].message.content
-
+    return "❌ Muitas requisições. Tente novamente em alguns segundos."
 
 # =========================
 # INTERFACE
