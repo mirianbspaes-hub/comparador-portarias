@@ -29,40 +29,46 @@ def extrair_texto(pdf):
     return texto
 
 
-def extrair_blocos(texto):
-    padrao = r"(Art\. ?\d+º?|§ ?\d+º?|[0-9]+\.[0-9\.]+)"
+import re
+
+def extrair_blocos_juridicos(texto):
+    padrao = r"(Art\. ?\d+º?|§ ?\d+º?|[IVXLC]+\s?-|[a-z]\)|[0-9]+\.[0-9\.]+)"
+    
     partes = re.split(padrao, texto)
     blocos = {}
 
     for i in range(1, len(partes), 2):
-        chave = partes[i]
-        conteudo = partes[i+1] if i+1 < len(partes) else ""
+        chave = partes[i].strip()
+        conteudo = partes[i+1].strip() if i+1 < len(partes) else ""
         blocos[chave] = conteudo
 
     return blocos
 
 
-def comparar(b1, b2):
+def comparar_juridico(b1, b2):
     resultado = []
-    chaves = set(b1.keys()).union(b2.keys())
+    chaves = sorted(set(b1.keys()).union(b2.keys()))
 
-    for c in sorted(chaves):
-        t1 = b1.get(c, "")
-        t2 = b2.get(c, "")
+    for c in chaves:
+        t1 = b1.get(c, "").strip()
+        t2 = b2.get(c, "").strip()
 
         if t1 == t2:
             resultado.append(("igual", c, t1))
+
         elif t1 and not t2:
             resultado.append(("removido", c, t1))
+
         elif not t1 and t2:
             resultado.append(("adicionado", c, t2))
+
         else:
             resultado.append(("alterado", c, t1, t2))
 
     return resultado
 
 
-def gerar_docx(resultado):
+def gerar_docx_oficial(resultado):
     doc = Document()
 
     style = doc.styles['Normal']
@@ -74,47 +80,66 @@ def gerar_docx(resultado):
         tipo = item[0]
 
         if tipo == "igual":
-            doc.add_paragraph(f"{item[1]} {item[2]}")
+            chave, texto = item[1], item[2]
+            doc.add_paragraph(f"{chave} {texto}")
 
         elif tipo == "removido":
+            chave, texto = item[1], item[2]
             p = doc.add_paragraph()
-            r = p.add_run(f"{item[1]} {item[2]}")
+            r = p.add_run(f"{chave} {texto}")
             r.font.strike = True
 
         elif tipo == "adicionado":
+            chave, texto = item[1], item[2]
             p = doc.add_paragraph()
-            r = p.add_run(f"{item[1]} {item[2]}")
+            r = p.add_run(f"{chave} {texto}")
             r.bold = True
 
         elif tipo == "alterado":
+            chave, antigo, novo = item[1], item[2], item[3]
+
+            # Texto antigo riscado
             p1 = doc.add_paragraph()
-            r1 = p1.add_run(f"{item[1]} {item[2]}")
+            r1 = p1.add_run(f"{chave} {antigo}")
             r1.font.strike = True
 
+            # Novo texto logo abaixo
             p2 = doc.add_paragraph()
-            r2 = p2.add_run(f"{item[1]} {item[3]}")
+            r2 = p2.add_run(f"{chave} {novo}")
             r2.bold = True
 
-    caminho = "Portaria_Comparada.docx"
+    caminho = "Portaria_Comparada_Oficial.docx"
     doc.save(caminho)
     return caminho
 
 
-def comparar_ia(t1, t2):
-    if not IA_ATIVA:
-        return "❌ IA não configurada. Adicione sua chave da OpenAI."
+def comparar_com_ia_refinada(t1, t2):
 
     prompt = f"""
-Compare juridicamente os textos abaixo:
+Você é especialista em legislação brasileira.
 
-- Texto antigo riscado
-- Texto novo abaixo
-- Manter estrutura
+Compare os textos abaixo seguindo RIGOROSAMENTE:
 
-TEXTO 1:
+- NÃO resumir
+- NÃO reescrever juridicamente
+- NÃO alterar conteúdo
+- NÃO omitir trechos
+
+Faça:
+
+1. Manter estrutura (Art., §, incisos)
+2. Texto antigo riscado (~~texto~~)
+3. Texto novo abaixo
+4. Inclusões destacadas
+5. Exclusões riscadas
+
+Objetivo:
+Gerar versão consolidada estilo Diário Oficial.
+
+TEXTO ORIGINAL:
 {t1}
 
-TEXTO 2:
+TEXTO ALTERADO:
 {t2}
 """
 
@@ -142,17 +167,16 @@ if st.button("🚀 Gerar comparação"):
         t2 = extrair_texto(pdf2)
 
         if modo == "Normal":
-            b1 = extrair_blocos(t1)
-            b2 = extrair_blocos(t2)
-            resultado = comparar(b1, b2)
-
-            arquivo = gerar_docx(resultado)
+            b1 = extrair_blocos_juridicos(t1)
+            b2 = extrair_blocos_juridicos(t2)
+            resultado = comparar_juridico(b1, b2)
+            arquivo = gerar_docx_oficial(resultado)
 
             with open(arquivo, "rb") as f:
                 st.download_button("📄 Baixar Word", f, file_name=arquivo)
 
         else:
-            resultado = comparar_ia(t1, t2)
+            resultado = comparar_com_ia_refinada(t1, t2)
             st.text_area("Resultado IA", resultado, height=400)
 
     else:
