@@ -26,9 +26,10 @@ def extrair_texto_pdf(pdf):
 
 def gerar_word_com_estilo(texto_ia):
     """
-    Transforma o Markdown da IA em formatação profissional do Word.
-    ~~texto~~ -> Riscado e Vermelho (Texto antigo/excluído)
-    **texto** -> Negrito e Azul Escuro (Texto novo/incluído)
+    Regras Aplicadas:
+    - ~~texto~~ -> Riscado (Cor Preta)
+    - **texto** -> Negrito (Cor Preta)
+    - [[Portaria XXX]] -> Azul e Sublinhado (Link)
     """
     doc = Document()
     style = doc.styles['Normal']
@@ -38,30 +39,37 @@ def gerar_word_com_estilo(texto_ia):
     for linha in texto_ia.split('\n'):
         linha = linha.strip()
         if not linha:
-            doc.add_paragraph() # Espaço entre parágrafos
+            doc.add_paragraph()
             continue
             
         p = doc.add_paragraph()
         
-        # Regex para identificar os marcadores de alteração da IA
-        partes = re.split(r'(~~.*?~~|\*\*.*?\*\*)', linha)
+        # Regex para identificar: Riscados (~~), Negritos (**) e Links ([[ ]])
+        partes = re.split(r'(~~.*?~~|\*\*.*?\*\*|\[\[.*?\]\])', linha)
         
         for parte in partes:
             if parte.startswith('~~') and parte.endswith('~~'):
-                # FORMATO: REMOVIDO/ALTERADO (Riscado + Vermelho)
+                # TEXTO REMOVIDO: Riscado em preto
                 texto_limpo = parte.replace('~~', '')
                 run = p.add_run(texto_limpo)
                 run.font.strike = True
-                run.font.color.rgb = RGBColor(200, 0, 0)
+                run.font.color.rgb = RGBColor(0, 0, 0)
             elif parte.startswith('**') and parte.endswith('**'):
-                # FORMATO: NOVO (Negrito + Azul)
+                # TEXTO ACRESCENTADO: Negrito em preto
                 texto_limpo = parte.replace('**', '')
                 run = p.add_run(texto_limpo)
                 run.bold = True
-                run.font.color.rgb = RGBColor(0, 51, 102)
+                run.font.color.rgb = RGBColor(0, 0, 0)
+            elif parte.startswith('[[') and parte.endswith(']]'):
+                # NOME DA PORTARIA: Azul e Sublinhado
+                texto_limpo = parte.replace('[[', '').replace(']]', '')
+                run = p.add_run(texto_limpo)
+                run.font.color.rgb = RGBColor(0, 0, 255)
+                run.underline = True
             else:
-                # TEXTO QUE PERMANECE IGUAL
-                p.add_run(parte)
+                # TEXTO NORMAL (PRETO)
+                run = p.add_run(parte)
+                run.font.color.rgb = RGBColor(0, 0, 0)
                 
     buffer = io.BytesIO()
     doc.save(buffer)
@@ -69,23 +77,20 @@ def gerar_word_com_estilo(texto_ia):
     return buffer
 
 def processar_comparacao_ia(texto_base, texto_alteracoes):
-    """
-    Instrução crucial: O Texto 1 é a BASE INTEGRAL. O Texto 2 são apenas os comandos de mudança.
-    """
-    
     prompt_sistema = """
     Você é um especialista em Consolidação Normativa Jurídica.
     
     SUA TAREFA:
-    Você deve pegar o 'TEXTO 1 (BASE INTEGRAL)' e usá-lo como o corpo principal do documento. 
-    Você percorrerá o TEXTO 1 e, somente onde o 'TEXTO 2 (ALTERAÇÕES)' indicar uma mudança, você aplicará a alteração no local exato.
+    Use o 'TEXTO 1' como base integral e aplique as mudanças do 'TEXTO 2'.
     
-    REGRAS DE FORMATAÇÃO:
-    1. NÃO SUPRIMA NADA do Texto 1 que não tenha sido expressamente alterado. O resultado final deve ser a Portaria completa.
-    2. Onde houver ALTERAÇÃO: coloque o texto original do Texto 1 riscado como ~~texto antigo~~ e, logo abaixo, a nova redação em negrito como **texto novo**.
-    3. Onde houver INCLUSÃO: insira o novo parágrafo/artigo no local correto em negrito **texto novo**.
-    4. Ao final de cada alteração, adicione a nota de rodapé jurídica (ex: Redação dada pela Portaria nº X).
-    5. Mantenha a estrutura original de Artigos, Parágrafos, Incisos e Alíneas.
+    REGRAS DE FORMATAÇÃO E CONTEÚDO:
+    1. NÃO crie seções de "Nota de rodapé".
+    2. Texto alterado/removido: Use ~~texto antigo~~ (Revogado pela [[Nome da Portaria]]).
+    3. Texto acrescentado: Use **novo texto** (Incluído pela [[Nome da Portaria]]).
+    4. A citação da portaria deve vir IMEDIATAMENTE após a alteração, entre parênteses, na mesma linha ou logo abaixo, mas nunca como uma nota de rodapé isolada no fim da página.
+    5. Para o NOME DA PORTARIA, use colchetes duplos: [[Portaria nº XXX, de data]].
+    6. O texto base que não sofreu alteração deve ser mantido integralmente em fonte normal.
+    7. Não use cores (vermelho/azul) no texto, exceto para o que estiver dentro de [[ ]].
     """
 
     try:
@@ -93,47 +98,38 @@ def processar_comparacao_ia(texto_base, texto_alteracoes):
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": prompt_sistema},
-                {"role": "user", "content": f"TEXTO 1 (BASE INTEGRAL QUE DEVE SER MANTIDA):\n{texto_base[:15000]}\n\nTEXTO 2 (SOMENTE AS ALTERAÇÕES A APLICAR):\n{texto_alteracoes[:10000]}"}
+                {"role": "user", "content": f"TEXTO 1 (BASE INTEGRAL):\n{texto_base[:15000]}\n\nTEXTO 2 (ALTERAÇÕES):\n{texto_alteracoes[:10000]}"}
             ],
             temperature=0
         )
         return response.choices[0].message.content
     except Exception as e:
-        return f"Erro na comunicação com a IA: {str(e)}"
+        return f"Erro na IA: {str(e)}"
 
 # =========================
 # INTERFACE STREAMLIT
 # =========================
 
-st.set_page_config(page_title="Comparador SAT - MTE", layout="wide")
-st.title("⚖️ Consolidador de Portarias (Base Integral)")
-
-st.warning("⚠️ O sistema usará o primeiro PDF como base completa e aplicará as mudanças contidas no segundo PDF.")
+st.set_page_config(page_title="Consolidador SAT", layout="wide")
+st.title("⚖️ Consolidador de Portarias Profissional")
 
 col1, col2 = st.columns(2)
 with col1:
-    pdf_base = st.file_uploader("1. Carregar Portaria ANTIGA COMPLETA (Base)", type="pdf")
+    pdf_base = st.file_uploader("1. Portaria ANTIGA (Base Integral)", type="pdf")
 with col2:
-    pdf_alt = st.file_uploader("2. Carregar Documento de ALTERAÇÕES (Texto Novo)", type="pdf")
+    pdf_alt = st.file_uploader("2. Documento de ALTERAÇÕES", type="pdf")
 
 if st.button("🚀 Gerar Portaria Consolidada"):
-    if not pdf_base or not pdf_alt:
-        st.error("Upload obrigatório dos dois arquivos.")
-    elif not client:
-        st.error("API Key não configurada.")
-    else:
-        with st.spinner("Consolidando textos..."):
+    if pdf_base and pdf_alt:
+        with st.spinner("Consolidando e formatando documento..."):
             t_base = extrair_texto_pdf(pdf_base)
             t_alt = extrair_texto_pdf(pdf_alt)
             
-            # Chama a função que trata o Texto 1 como soberano/base
             resultado_ia = processar_comparacao_ia(t_base, t_alt)
             
-            if "Erro" in resultado_ia:
-                st.error(resultado_ia)
-            else:
+            if "Erro" not in resultado_ia:
                 arquivo_docx = gerar_word_com_estilo(resultado_ia)
-                st.success("✅ Portaria consolidada com sucesso!")
+                st.success("✅ Documento consolidado com sucesso!")
                 
                 st.download_button(
                     label="📥 Baixar Portaria_Consolidada.docx",
@@ -141,6 +137,9 @@ if st.button("🚀 Gerar Portaria Consolidada"):
                     file_name="Portaria_Consolidada.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 )
-                
-                with st.expander("Prévia das Alterações"):
+                with st.expander("Prévia do Texto Gerado"):
                     st.write(resultado_ia)
+            else:
+                st.error(resultado_ia)
+    else:
+        st.error("Por favor, carregue os dois arquivos PDF.")
