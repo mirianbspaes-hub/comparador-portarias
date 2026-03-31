@@ -4,13 +4,15 @@ import re
 from docx import Document
 from docx.shared import Pt
 import os
+st.write("API KEY carregada:", bool(os.getenv("OPENAI_API_KEY")))
+from openai import OpenAI
 
-# IA (opcional)
-try:
-    from openai import OpenAI
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+api_key = os.getenv("OPENAI_API_KEY")
+
+if api_key:
+    client = OpenAI(api_key=api_key)
     IA_ATIVA = True
-except:
+else:
     IA_ATIVA = False
 
 st.set_page_config(page_title="Comparador de Portarias")
@@ -142,6 +144,13 @@ TEXTO ORIGINAL:
 TEXTO ALTERADO:
 {t2}
 """
+
+    if not IA_ATIVA:
+        return "❌ IA não configurada. Adicione sua chave da OpenAI."
+
+    prompt = f"""
+    (seu prompt aqui)
+    """
 
     resp = client.chat.completions.create(
         model="gpt-5",
