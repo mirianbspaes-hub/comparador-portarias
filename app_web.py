@@ -3,6 +3,7 @@ import pdfplumber
 import re
 import io
 import os
+import time
 from docx import Document
 from docx.shared import Pt, RGBColor
 from openai import OpenAI
@@ -37,8 +38,6 @@ def gerar_word_com_estilo(texto_ia):
             continue
             
         p = doc.add_paragraph()
-        
-        # Identifica: Riscados (~~), Negritos (**) e Links ([[ ]])
         partes = re.split(r'(~~.*?~~|\*\*.*?\*\*|\[\[.*?\]\])', linha)
         
         for parte in partes:
@@ -64,20 +63,19 @@ def gerar_word_com_estilo(texto_ia):
     return buffer
 
 def processar_comparacao_ia(texto_base, texto_alteracoes):
-    # AJUSTE CRÍTICO: Instruções anti-alucinação e fidelidade aos dados
     prompt_sistema = """
-    Você é um compilador jurídico de alta precisão. Sua tarefa é integrar alterações em uma norma base.
+    Você é um compilador jurídico de precisão absoluta. 
+    Sua tarefa é integrar as alterações do 'TEXTO 2' na norma base 'TEXTO 1'.
 
-    REGRAS DE FIDELIDADE (MUITO IMPORTANTE):
-    1. NÃO adicione leis, datas ou nomes que NÃO estejam nos textos fornecidos. 
-    2. NÃO invente fundamentações legais (ex: Lei nº 14.967). Se não está no texto, não coloque.
-    3. Use o 'TEXTO 1' como base integral. O 'TEXTO 2' contém as únicas alterações permitidas.
-
-    REGRAS DE FORMATAÇÃO:
-    - Texto removido do TEXTO 1: Use ~~texto antigo~~ (Revogado pela [[Nome da Portaria do Texto 2]]).
-    - Texto novo vindo do TEXTO 2: Use **novo texto** (Incluído pela [[Nome da Portaria do Texto 2]]).
-    - Nome da Portaria: Sempre em colchetes duplos [[Portaria nº XXX]].
-    - NÃO use notas de rodapé. Coloque a citação imediatamente após a alteração.
+    REGRAS DE OURO:
+    1. FIDELIDADE TOTAL: NÃO adicione leis, datas, artigos ou fatos que NÃO constem nos arquivos enviados. 
+    2. BASE INTEGRAL: Use o 'TEXTO 1' como estrutura completa. Não suprima artigos não alterados.
+    3. SEM NOTAS DE RODAPÉ: A citação da portaria deve vir logo após a alteração.
+    
+    FORMATAÇÃO:
+    - Removido: ~~texto original~~ (Revogado pela [[Nome da Portaria do Texto 2]]).
+    - Novo: **novo texto** (Incluído pela [[Nome da Portaria do Texto 2]]).
+    - Portaria: Sempre entre colchetes duplos [[Portaria nº XXX]].
     """
 
     try:
@@ -85,9 +83,9 @@ def processar_comparacao_ia(texto_base, texto_alteracoes):
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": prompt_sistema},
-                {"role": "user", "content": f"TEXTO 1 (BASE):\n{texto_base[:15000]}\n\nTEXTO 2 (ALTERAÇÕES):\n{texto_alteracoes[:10000]}"}
+                {"role": "user", "content": f"TEXTO 1 (BASE):\n{texto_base[:18000]}\n\nTEXTO 2 (ALTERAÇÕES):\n{texto_alteracoes[:12000]}"}
             ],
-            temperature=0 # Temperatura 0 evita que a IA invente coisas (alucinação)
+            temperature=0
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -100,29 +98,42 @@ def processar_comparacao_ia(texto_base, texto_alteracoes):
 st.set_page_config(page_title="Consolidador SAT", layout="wide")
 st.title("⚖️ Consolidador de Portarias Profissional")
 
+# Inicializa o estado para evitar erros de renderização
+if 'resultado_ia' not in st.session_state:
+    st.session_state.resultado_ia = None
+
 col1, col2 = st.columns(2)
 with col1:
-    pdf_base = st.file_uploader("1. Portaria ANTIGA (Base Integral)", type="pdf")
+    pdf_base = st.file_uploader("1. Portaria ANTIGA (Base)", type="pdf")
 with col2:
-    pdf_alt = st.file_uploader("2. Documento de ALTERAÇÕES", type="pdf")
+    pdf_alt = st.file_uploader("2. Portaria de ALTERAÇÕES", type="pdf")
 
 if st.button("🚀 Gerar Portaria Consolidada"):
     if pdf_base and pdf_alt:
-        with st.spinner("Consolidando..."):
+        with st.spinner("Processando..."):
             t_base = extrair_texto_pdf(pdf_base)
             t_alt = extrair_texto_pdf(pdf_alt)
+            st.session_state.resultado_ia = processar_comparacao_ia(t_base, t_alt)
+    else:
+        st.error("Carregue os dois arquivos.")
+
+# Área de download protegida para evitar erro de 'removeChild'
+if st.session_state.resultado_ia:
+    with st.container():
+        res = st.session_state.resultado_ia
+        if "Erro" not in res:
+            doc_buffer = gerar_word_com_estilo(res)
+            st.success("✅ Comparação pronta!")
             
-            resultado_ia = processar_comparacao_ia(t_base, t_alt)
+            st.download_button(
+                label="📥 Baixar Portaria Consolidada",
+                data=doc_buffer,
+                file_name="Portaria_Consolidada.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key="btn_download_v1" # Chave única para estabilidade
+            )
             
-            if "Erro" not in resultado_ia:
-                arquivo_docx = gerar_word_com_estilo(resultado_ia)
-                st.success("✅ Documento consolidado!")
-                
-                st.download_button(
-                    label="📥 Baixar Portaria_Consolidada.docx",
-                    data=arquivo_docx,
-                    file_name="Portaria_Consolidada.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                )
-            else:
-                st.error(resultado_ia)
+            with st.expander("Ver prévia do texto"):
+                st.write(res)
+        else:
+            st.error(res)
