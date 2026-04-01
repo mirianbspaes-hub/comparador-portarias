@@ -2,13 +2,12 @@ import streamlit as st
 import pdfplumber
 import re
 import io
-import time
 from docx import Document
 from docx.shared import Pt, RGBColor
 from openai import OpenAI
 
 # =========================
-# CONFIGURAÇÃO
+# CONFIG
 # =========================
 api_key = st.secrets.get("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key) if api_key else None
@@ -16,19 +15,7 @@ client = OpenAI(api_key=api_key) if api_key else None
 # =========================
 # EXTRAÇÃO
 # =========================
-def limpar_reticencias(texto):
-    # remove linhas compostas só por pontos
-    texto = re.sub(r"\.{5,}", "", texto)
-
-    # remove linhas com muitos pontos e espaços
-    texto = re.sub(r"(\.\s*){5,}", "", texto)
-
-    # remove linhas vazias geradas
-    texto = "\n".join([l for l in texto.split("\n") if l.strip() != ""])
-
-    return texto
-
-def extrair_texto_pdf(pdf):
+def extrair_texto(pdf):
     texto = ""
     with pdfplumber.open(pdf) as p:
         for page in p.pages:
@@ -36,48 +23,166 @@ def extrair_texto_pdf(pdf):
     return texto
 
 # =========================
-# DIVISÃO EM BLOCOS
+# LIMPEZA
 # =========================
-def dividir_texto(texto, max_chars=12000):
-    return [texto[i:i+max_chars] for i in range(0, len(texto), max_chars)]
+def limpar_texto(texto):
+    texto = re.sub(r"\.{5,}", "", texto)
+    texto = re.sub(r"(\.\s*){5,}", "", texto)
+    return texto
 
 # =========================
-# GERAR WORD PROFISSIONAL
+# ESTRUTURAÇÃO
 # =========================
-def gerar_word_fidelidade(texto_ia):
+def extrair_estrutura(texto):
+    padrao = r"(Art\. ?\d+º?.*?)(?=Art\.|\Z)"
+    artigos = re.findall(padrao, texto, re.DOTALL)
+
+    estrutura = {}
+    for art in artigos:
+        num = re.search(r"Art\. ?(\d+)", art)
+        if num:
+            estrutura[f"Art. {num.group(1)}"] = art.strip()
+
+    return estrutura
+
+# =========================
+# DETECTOR DE ALTERAÇÃO
+# =========================
+def detectar_tipo(alteracao):
+    a = alteracao.lower()
+
+    if "passa a vigorar" in a:
+        return "substituicao"
+
+    if "acrescenta" in a or "inclui" in a:
+        return "inclusao"
+
+    if "revoga" in a:
+        return "revogacao"
+
+    if "onde se lê" in a:
+        return "parcial"
+
+    return "desconhecido"
+
+# =========================
+# EXTRAIR ALTERAÇÕES
+# =========================
+def extrair_alteracoes(texto):
+    blocos = re.split(r"Art\. ?\d+º?", texto)
+    alteracoes = []
+
+    for b in blocos:
+        if len(b.strip()) > 50:
+            tipo = detectar_tipo(b)
+            art = re.search(r"art\. ?(\d+)", b.lower())
+
+            if art:
+                alteracoes.append({
+                    "artigo": f"Art. {art.group(1)}",
+                    "tipo": tipo,
+                    "texto": b.strip()
+                })
+
+    return alteracoes
+
+# =========================
+# IA PARA CASOS COMPLEXOS
+# =========================
+def aplicar_ia(original, instrucao):
+    if not client:
+        return original
+
+    prompt = """
+Você é especialista em legislação brasileira.
+
+Aplique a instrução ao texto original.
+
+REGRAS:
+- NÃO inventar
+- NÃO resumir
+- NÃO alterar estrutura
+- manter fidelidade jurídica
+
+FORMATAÇÃO:
+- removido: ~~texto~~
+- novo: **texto**
+"""
+
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": f"TEXTO:\n{original}\n\nINSTRUÇÃO:\n{instrucao}"}
+        ],
+        temperature=0
+    )
+
+    return resp.choices[0].message.content
+
+# =========================
+# CONSOLIDAÇÃO PRINCIPAL
+# =========================
+def consolidar(base, alteracoes):
+
+    resultado = base.copy()
+
+    for alt in alteracoes:
+        art = alt["artigo"]
+        tipo = alt["tipo"]
+        texto = alt["texto"]
+
+        if art not in resultado:
+            continue
+
+        original = resultado[art]
+
+        # 🔥 SUBSTITUIÇÃO COMPLETA (SEM IA)
+        if tipo == "substituicao":
+            novo = re.split(r"redação:(.*)", texto, flags=re.DOTALL)
+            if len(novo) > 1:
+                resultado[art] = f"{art} ~~{original}~~\n{art} **{novo[1].strip()}**"
+            else:
+                resultado[art] = aplicar_ia(original, texto)
+
+        # 🔥 INCLUSÃO
+        elif tipo == "inclusao":
+            resultado[art] += f"\n\n**{texto}**"
+
+        # 🔥 REVOGAÇÃO
+        elif tipo == "revogacao":
+            resultado[art] = f"~~{original}~~"
+
+        # 🔥 PARCIAL
+        else:
+            resultado[art] = aplicar_ia(original, texto)
+
+    return resultado
+
+# =========================
+# GERAR WORD
+# =========================
+def gerar_word(textos):
     doc = Document()
+
     style = doc.styles['Normal']
     style.font.name = 'Times New Roman'
     style.font.size = Pt(12)
 
-    for linha in texto_ia.split('\n'):
-        linha = linha.strip()
-
-        if not linha:
-            doc.add_paragraph()
-            continue
-
+    for art in textos.values():
         p = doc.add_paragraph()
-        p.paragraph_format.space_after = Pt(6)
 
-        partes = re.split(r'(~~.*?~~|\*\*.*?\*\*|\[\[.*?\]\])', linha)
+        partes = re.split(r'(~~.*?~~|\*\*.*?\*\*)', art)
 
         for parte in partes:
-            if parte.startswith('~~') and parte.endswith('~~'):
-                run = p.add_run(parte.replace('~~', ''))
-                run.font.strike = True
-                run.font.color.rgb = RGBColor(255, 0, 0)
-
-            elif parte.startswith('**') and parte.endswith('**'):
-                run = p.add_run(parte.replace('**', ''))
-                run.bold = True
-                run.font.color.rgb = RGBColor(0, 128, 0)
-
-            elif parte.startswith('[[') and parte.endswith(']]'):
-                run = p.add_run(parte.replace('[[', '').replace(']]', ''))
-                run.font.color.rgb = RGBColor(0, 0, 255)
-                run.underline = True
-
+            if parte.startswith("~~"):
+                r = p.add_run(parte.replace("~~", ""))
+                r.font.strike = True
+                r.font.color.rgb = RGBColor(255, 0, 0)
+            elif parte.startswith("**"):
+                r = p.add_run(parte.replace("**", ""))
+                r.bold = True
+                r.font.color.rgb = RGBColor(0, 128, 0)
             else:
                 p.add_run(parte)
 
@@ -87,109 +192,35 @@ def gerar_word_fidelidade(texto_ia):
     return buffer
 
 # =========================
-# IA COM CONTROLE
+# UI
 # =========================
-def comparar_por_blocos(t_base, t_alt):
+st.set_page_config(page_title="Motor Jurídico Avançado", layout="wide")
 
-    if not client:
-        st.error("❌ Configure a chave da OpenAI no Secrets.")
-        return ""
+st.title("⚖️ Consolidador Jurídico Profissional")
 
-    # limpar reticências antes de tudo
-    t_base = limpar_reticencias(t_base)
-    t_alt = limpar_reticencias(t_alt)
+pdf1 = st.file_uploader("Portaria ORIGINAL", type="pdf")
+pdf2 = st.file_uploader("Portaria ALTERADORA", type="pdf")
 
-    blocos = dividir_texto(t_base)
+if st.button("🚀 Consolidar Documento"):
 
-    if len(blocos) > 20:
-        st.warning("⚠️ Documento muito grande. Pode gerar custo alto.")
+    if pdf1 and pdf2:
 
-    resultado_final = ""
-    barra_progresso = st.progress(0)
-    total_blocos = len(blocos)
+        base_texto = limpar_texto(extrair_texto(pdf1))
+        alt_texto = limpar_texto(extrair_texto(pdf2))
 
-    for i, bloco in enumerate(blocos):
+        base = extrair_estrutura(base_texto)
+        alteracoes = extrair_alteracoes(alt_texto)
 
-        st.write(f"Processando parte {i+1} de {total_blocos}...")
+        resultado = consolidar(base, alteracoes)
 
-        # 🔥 FILTRO: só manda blocos relevantes
-        if "Art." not in bloco and "§" not in bloco:
-            resultado_final += bloco + "\n"
-            barra_progresso.progress((i + 1) / total_blocos)
-            continue
+        doc = gerar_word(resultado)
 
-        prompt = """
-Você é um especialista em consolidação normativa brasileira.
-
-Sua tarefa:
-Aplicar ALTERAÇÕES ao TEXTO BASE sem alterar conteúdo original desnecessariamente.
-
-REGRAS OBRIGATÓRIAS:
-- NÃO inventar conteúdo
-- NÃO reescrever juridicamente
-- NÃO resumir
-- NÃO alterar estrutura (Art., §, incisos)
-- Trechos com "....." indicam continuidade e NÃO são alteração
-
-FORMATAÇÃO:
-- Texto removido: ~~texto~~
-- Texto novo: **texto**
-- Indicar origem: [[Portaria]]
-
-Se não houver alteração, repetir exatamente o texto original.
-"""
-
-        try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": f"TEXTO BASE:\n{bloco}\n\nALTERAÇÕES:\n{t_alt}"}
-                ],
-                temperature=0
-            )
-
-            resultado_final += response.choices[0].message.content + "\n"
-
-        except Exception as e:
-            resultado_final += f"\n[ERRO NO BLOCO {i+1}: {e}]\n"
-
-        barra_progresso.progress((i + 1) / total_blocos)
-        time.sleep(0.5)
-
-    return resultado_final
-
-# =========================
-# INTERFACE
-# =========================
-st.set_page_config(page_title="Consolidador de Portarias", layout="wide")
-
-st.title("⚖️ Consolidador de Portarias (Profissional)")
-st.write("Processa portarias grandes com IA, mantendo fidelidade jurídica.")
-
-f1 = st.file_uploader("1. Portaria Base (completa)", type="pdf")
-f2 = st.file_uploader("2. Documento de Alterações", type="pdf")
-
-# =========================
-# EXECUÇÃO
-# =========================
-if st.button("🚀 Iniciar Consolidação por Partes"):
-
-    if f1 and f2:
-
-        t1 = extrair_texto_pdf(f1)
-        t2 = extrair_texto_pdf(f2)
-
-        resultado = comparar_por_blocos(t1, t2)
-
-        doc_buffer = gerar_word_fidelidade(resultado)
-
-        st.success("✅ Consolidação concluída com sucesso!")
+        st.success("✅ Consolidação concluída!")
 
         st.download_button(
-            "📥 Baixar Documento Consolidado",
-            doc_buffer,
-            "Portaria_Consolidada.docx"
+            "📥 Baixar Word",
+            doc,
+            "Portaria_Consolidada_Final.docx"
         )
 
     else:
