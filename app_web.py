@@ -2,226 +2,192 @@ import streamlit as st
 import pdfplumber
 import re
 import io
+import os
+import time
 from docx import Document
 from docx.shared import Pt, RGBColor
 from openai import OpenAI
 
 # =========================
-# CONFIG
+# CONFIGURAÇÃO DE AMBIENTE
 # =========================
-api_key = st.secrets.get("OPENAI_API_KEY")
+api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key) if api_key else None
 
 # =========================
-# EXTRAÇÃO
+# FUNÇÕES DE PROCESSAMENTO
 # =========================
-def extrair_texto(pdf):
+
+def extrair_texto_pdf(pdf):
     texto = ""
     with pdfplumber.open(pdf) as p:
         for page in p.pages:
             texto += (page.extract_text() or "") + "\n"
     return texto
 
-# =========================
-# LIMPEZA
-# =========================
-def limpar_texto(texto):
-    texto = re.sub(r"\.{5,}", "", texto)
-    texto = re.sub(r"(\.\s*){5,}", "", texto)
-    return texto
+def dividir_texto(texto, max_chars=8000):
+    """Divide textos grandes em blocos menores para a IA não se perder nem resumir."""
+    blocos = []
+    inicio = 0
+    while inicio < len(texto):
+        fim = inicio + max_chars
+        if fim < len(texto):
+            # Tenta quebrar em dupla quebra de linha ou quebra simples
+            pos_quebra = texto.rfind('\n\n', inicio, fim)
+            if pos_quebra == -1 or pos_quebra <= inicio:
+                pos_quebra = texto.rfind('\n', inicio, fim)
+            if pos_quebra != -1 and pos_quebra > inicio:
+                fim = pos_quebra
+        blocos.append(texto[inicio:fim])
+        inicio = fim
+    return blocos
 
-# =========================
-# ESTRUTURAÇÃO
-# =========================
-def extrair_estrutura(texto):
-    padrao = r"(Art\. ?\d+º?.*?)(?=Art\.|\Z)"
-    artigos = re.findall(padrao, texto, re.DOTALL)
-
-    estrutura = {}
-    for art in artigos:
-        num = re.search(r"Art\. ?(\d+)", art)
-        if num:
-            estrutura[f"Art. {num.group(1)}"] = art.strip()
-
-    return estrutura
-
-# =========================
-# DETECTOR DE ALTERAÇÃO
-# =========================
-def detectar_tipo(alteracao):
-    a = alteracao.lower()
-
-    if "passa a vigorar" in a:
-        return "substituicao"
-
-    if "acrescenta" in a or "inclui" in a:
-        return "inclusao"
-
-    if "revoga" in a:
-        return "revogacao"
-
-    if "onde se lê" in a:
-        return "parcial"
-
-    return "desconhecido"
-
-# =========================
-# EXTRAIR ALTERAÇÕES
-# =========================
-def extrair_alteracoes(texto):
-    blocos = re.split(r"Art\. ?\d+º?", texto)
-    alteracoes = []
-
-    for b in blocos:
-        if len(b.strip()) > 50:
-            tipo = detectar_tipo(b)
-            art = re.search(r"art\. ?(\d+)", b.lower())
-
-            if art:
-                alteracoes.append({
-                    "artigo": f"Art. {art.group(1)}",
-                    "tipo": tipo,
-                    "texto": b.strip()
-                })
-
-    return alteracoes
-
-# =========================
-# IA PARA CASOS COMPLEXOS
-# =========================
-def aplicar_ia(original, instrucao):
-    if not client:
-        return original
-
-    prompt = """
-Você é especialista em legislação brasileira.
-
-Aplique a instrução ao texto original.
-
-REGRAS:
-- NÃO inventar
-- NÃO resumir
-- NÃO alterar estrutura
-- manter fidelidade jurídica
-
-FORMATAÇÃO:
-- removido: ~~texto~~
-- novo: **texto**
-"""
-
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": f"TEXTO:\n{original}\n\nINSTRUÇÃO:\n{instrucao}"}
-        ],
-        temperature=0
-    )
-
-    return resp.choices[0].message.content
-
-# =========================
-# CONSOLIDAÇÃO PRINCIPAL
-# =========================
-def consolidar(base, alteracoes):
-
-    resultado = base.copy()
-
-    for alt in alteracoes:
-        art = alt["artigo"]
-        tipo = alt["tipo"]
-        texto = alt["texto"]
-
-        if art not in resultado:
-            continue
-
-        original = resultado[art]
-
-        # 🔥 SUBSTITUIÇÃO COMPLETA (SEM IA)
-        if tipo == "substituicao":
-            novo = re.split(r"redação:(.*)", texto, flags=re.DOTALL)
-            if len(novo) > 1:
-                resultado[art] = f"{art} ~~{original}~~\n{art} **{novo[1].strip()}**"
-            else:
-                resultado[art] = aplicar_ia(original, texto)
-
-        # 🔥 INCLUSÃO
-        elif tipo == "inclusao":
-            resultado[art] += f"\n\n**{texto}**"
-
-        # 🔥 REVOGAÇÃO
-        elif tipo == "revogacao":
-            resultado[art] = f"~~{original}~~"
-
-        # 🔥 PARCIAL
-        else:
-            resultado[art] = aplicar_ia(original, texto)
-
-    return resultado
-
-# =========================
-# GERAR WORD
-# =========================
-def gerar_word(textos):
+def gerar_word_fidelidade_total(texto_ia):
     doc = Document()
-
     style = doc.styles['Normal']
-    style.font.name = 'Times New Roman'
-    style.font.size = Pt(12)
+    style.font.name = 'Arial'
+    style.font.size = Pt(11)
+    style.paragraph_format.space_after = Pt(6)
+    style.paragraph_format.line_spacing = 1.0 
 
-    for art in textos.values():
+    for linha in texto_ia.split('\n'):
+        linha = linha.strip()
+        
+        if not linha:
+            doc.add_paragraph()
+            continue
+            
         p = doc.add_paragraph()
+        
+        # Preserva recuos legais de artigos e incisos
+        if linha.startswith("Art."):
+            p.paragraph_format.first_line_indent = Pt(0)
+        elif linha.startswith("§") or re.match(r'^[a-z]\)|\d+\.|[IVXLC]+\s?-', linha):
+            p.paragraph_format.left_indent = Pt(36)
 
-        partes = re.split(r'(~~.*?~~|\*\*.*?\*\*)', art)
-
+        partes = re.split(r'(~~.*?~~|\*\*.*?\*\*|\[\[.*?\]\])', linha)
+        
         for parte in partes:
-            if parte.startswith("~~"):
-                r = p.add_run(parte.replace("~~", ""))
-                r.font.strike = True
-                r.font.color.rgb = RGBColor(255, 0, 0)
-            elif parte.startswith("**"):
-                r = p.add_run(parte.replace("**", ""))
-                r.bold = True
-                r.font.color.rgb = RGBColor(0, 128, 0)
+            if parte.startswith('~~') and parte.endswith('~~'):
+                # TEXTO REMOVIDO: Riscado e Preto
+                texto_limpo = parte.replace('~~', '')
+                run = p.add_run(texto_limpo)
+                run.font.strike = True
+                run.font.color.rgb = RGBColor(0, 0, 0)
+            elif parte.startswith('**') and parte.endswith('**'):
+                # TEXTO NOVO: Negrito e Preto
+                texto_limpo = parte.replace('**', '')
+                run = p.add_run(texto_limpo)
+                run.bold = True
+                run.font.color.rgb = RGBColor(0, 0, 0)
+            elif parte.startswith('[[') and parte.endswith(']]'):
+                # NOME DA PORTARIA: Azul e Sublinhado
+                texto_limpo = parte.replace('[[', '').replace(']]', '')
+                run = p.add_run(texto_limpo)
+                run.font.color.rgb = RGBColor(0, 0, 255)
+                run.underline = True
             else:
-                p.add_run(parte)
-
+                run = p.add_run(parte)
+                run.font.color.rgb = RGBColor(0, 0, 0)
+                
     buffer = io.BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     return buffer
 
+def processar_comparacao_ia_blocos(texto_base, texto_alteracoes):
+    blocos = dividir_texto(texto_base)
+    resultado_final = ""
+    
+    total_blocos = len(blocos)
+    barra_progresso = st.progress(0)
+    status_texto = st.empty()
+
+    prompt_sistema = """
+    Você é um compilador jurídico de precisão absoluta. 
+    Sua única tarefa é aplicar as alterações do 'TEXTO 2' no 'BLOCO DO TEXTO 1'.
+
+    REGRAS DE FIDELIDADE (PROIBIÇÕES CRÍTICAS):
+    1. NÃO MESCLE PREÂMBULOS: Ignore o preâmbulo ou cabeçalho do TEXTO 2. Aplique APENAS os comandos de alteração (ex: "O art. X passa a vigorar...").
+    2. NÃO ADICIONE NADA que não seja uma ordem direta do TEXTO 2.
+    3. SE O TEXTO 2 NÃO MANDAR ALTERAR NADA NESTE BLOCO ESPECÍFICO, DEVOLVA O BLOCO EXATAMENTE COMO ELE É. Não resuma.
+    
+    REGRAS DE FORMATAÇÃO:
+    - Onde houver alteração, mantenha o original riscado: ~~texto antigo~~ (Revogado pela [[Nome da Portaria do Texto 2]]).
+    - Insira a nova redação logo abaixo: **texto novo** (Incluído pela [[Nome da Portaria do Texto 2]]).
+    - Use os colchetes duplos [[ ]] estritamente para o nome da portaria alteradora.
+    """
+
+    for i, bloco in enumerate(blocos):
+        status_texto.markdown(f"**Analisando parte {i+1} de {total_blocos} da Portaria...**")
+        
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": prompt_sistema},
+                    {"role": "user", "content": f"BLOCO DO TEXTO 1 (BASE):\n{bloco}\n\nTEXTO 2 (ALTERAÇÕES A APLICAR SE NECESSÁRIO):\n{texto_alteracoes[:15000]}"}
+                ],
+                temperature=0
+            )
+            resultado_final += response.choices[0].message.content + "\n\n"
+        except Exception as e:
+            return f"Erro na comunicação com a IA na parte {i+1}: {str(e)}"
+            
+        barra_progresso.progress((i + 1) / total_blocos)
+        time.sleep(1) # Pausa curta para não estourar o limite da API (Rate Limit)
+
+    status_texto.empty()
+    return resultado_final
+
 # =========================
-# UI
+# INTERFACE STREAMLIT
 # =========================
-st.set_page_config(page_title="Motor Jurídico Avançado", layout="wide")
 
-st.title("⚖️ Consolidador Jurídico Profissional")
+st.set_page_config(page_title="Consolidador Profissional", layout="wide")
+st.title("⚖️ Consolidador de Portarias Longas e Complexas")
 
-pdf1 = st.file_uploader("Portaria ORIGINAL", type="pdf")
-pdf2 = st.file_uploader("Portaria ALTERADORA", type="pdf")
+# Estado da sessão para evitar erros de renderização (removeChild)
+if 'resultado_consolidado' not in st.session_state:
+    st.session_state.resultado_consolidado = None
 
-if st.button("🚀 Consolidar Documento"):
+col1, col2 = st.columns(2)
+with col1:
+    pdf_base = st.file_uploader("1. Portaria ORIGINAL (Base Completa)", type="pdf", key="f_base")
+with col2:
+    pdf_alt = st.file_uploader("2. Portaria ALTERADORA", type="pdf", key="f_alt")
 
-    if pdf1 and pdf2:
-
-        base_texto = limpar_texto(extrair_texto(pdf1))
-        alt_texto = limpar_texto(extrair_texto(pdf2))
-
-        base = extrair_estrutura(base_texto)
-        alteracoes = extrair_alteracoes(alt_texto)
-
-        resultado = consolidar(base, alteracoes)
-
-        doc = gerar_word(resultado)
-
-        st.success("✅ Consolidação concluída!")
-
-        st.download_button(
-            "📥 Baixar Word",
-            doc,
-            "Portaria_Consolidada_Final.docx"
-        )
-
+if st.button("🚀 Processar e Consolidar (Lê Anexos e Tabelas)", key="btn_run"):
+    if not pdf_base or not pdf_alt:
+        st.warning("Faça o upload dos dois arquivos PDF.")
+    elif not client:
+        st.error("API Key da OpenAI não configurada.")
     else:
-        st.warning("Envie os dois PDFs.")
+        t_base = extrair_texto_pdf(pdf_base)
+        t_alt = extrair_texto_pdf(pdf_alt)
+        
+        # Limpa o resultado anterior da tela se houver
+        st.session_state.resultado_consolidado = None
+        
+        with st.spinner("Iniciando a leitura estruturada do documento..."):
+            st.session_state.resultado_consolidado = processar_comparacao_ia_blocos(t_base, t_alt)
+
+# Container isolado para o resultado
+if st.session_state.resultado_consolidado:
+    res = st.session_state.resultado_consolidado
+    if "Erro" not in res:
+        st.success("✅ Consolidação de todas as páginas concluída com sucesso!")
+        doc_buffer = gerar_word_fidelidade_total(res)
+        
+        st.download_button(
+            label="📥 Baixar Portaria_Consolidada.docx",
+            data=doc_buffer,
+            file_name="Portaria_Consolidada_Final.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key="btn_dl_final"
+        )
+        
+        with st.expander("Visualizar texto consolidado pelo sistema"):
+            st.write(res)
+    else:
+        st.error(res)
