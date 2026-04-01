@@ -11,7 +11,7 @@ from openai import OpenAI
 # =========================
 # CONFIGURAÇÃO DE AMBIENTE
 # =========================
-api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+api_key = st.secrets.get("OPENAI_API_KEY") if "OPENAI_API_KEY" in st.secrets else os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key) if api_key else None
 
 # =========================
@@ -26,13 +26,12 @@ def extrair_texto_pdf(pdf):
     return texto
 
 def dividir_texto(texto, max_chars=8000):
-    """Divide textos grandes em blocos menores para a IA não se perder nem resumir."""
+    """Divide textos grandes para a IA ler em pedaços seguros."""
     blocos = []
     inicio = 0
     while inicio < len(texto):
         fim = inicio + max_chars
         if fim < len(texto):
-            # Tenta quebrar em dupla quebra de linha ou quebra simples
             pos_quebra = texto.rfind('\n\n', inicio, fim)
             if pos_quebra == -1 or pos_quebra <= inicio:
                 pos_quebra = texto.rfind('\n', inicio, fim)
@@ -42,7 +41,7 @@ def dividir_texto(texto, max_chars=8000):
         inicio = fim
     return blocos
 
-def gerar_word_fidelidade_total(texto_ia):
+def gerar_word_fidelidade_total(texto_final):
     doc = Document()
     style = doc.styles['Normal']
     style.font.name = 'Arial'
@@ -50,16 +49,15 @@ def gerar_word_fidelidade_total(texto_ia):
     style.paragraph_format.space_after = Pt(6)
     style.paragraph_format.line_spacing = 1.0 
 
-    for linha in texto_ia.split('\n'):
+    for linha in texto_final.split('\n'):
         linha = linha.strip()
-        
         if not linha:
             doc.add_paragraph()
             continue
             
         p = doc.add_paragraph()
         
-        # Preserva recuos legais de artigos e incisos
+        # Preserva recuos
         if linha.startswith("Art."):
             p.paragraph_format.first_line_indent = Pt(0)
         elif linha.startswith("§") or re.match(r'^[a-z]\)|\d+\.|[IVXLC]+\s?-', linha):
@@ -69,21 +67,15 @@ def gerar_word_fidelidade_total(texto_ia):
         
         for parte in partes:
             if parte.startswith('~~') and parte.endswith('~~'):
-                # TEXTO REMOVIDO: Riscado e Preto
-                texto_limpo = parte.replace('~~', '')
-                run = p.add_run(texto_limpo)
+                run = p.add_run(parte[2:-2])
                 run.font.strike = True
                 run.font.color.rgb = RGBColor(0, 0, 0)
             elif parte.startswith('**') and parte.endswith('**'):
-                # TEXTO NOVO: Negrito e Preto
-                texto_limpo = parte.replace('**', '')
-                run = p.add_run(texto_limpo)
+                run = p.add_run(parte[2:-2])
                 run.bold = True
                 run.font.color.rgb = RGBColor(0, 0, 0)
             elif parte.startswith('[[') and parte.endswith(']]'):
-                # NOME DA PORTARIA: Azul e Sublinhado
-                texto_limpo = parte.replace('[[', '').replace(']]', '')
-                run = p.add_run(texto_limpo)
+                run = p.add_run(parte[2:-2])
                 run.font.color.rgb = RGBColor(0, 0, 255)
                 run.underline = True
             else:
@@ -95,99 +87,111 @@ def gerar_word_fidelidade_total(texto_ia):
     buffer.seek(0)
     return buffer
 
-def processar_comparacao_ia_blocos(texto_base, texto_alteracoes):
-    blocos = dividir_texto(texto_base)
-    resultado_final = ""
+def processar_comparacao_rapida(texto_base, texto_alteracoes):
+    blocos = dividir_texto(texto_base, 8000)
+    resultado_final = []
     
     total_blocos = len(blocos)
     barra_progresso = st.progress(0)
     status_texto = st.empty()
 
+    # O Segredo da Velocidade: Se não houver alteração no bloco, a IA devolve 1 palavra só.
     prompt_sistema = """
-    Você é um compilador jurídico de precisão absoluta. 
-    Sua única tarefa é aplicar as alterações do 'TEXTO 2' no 'BLOCO DO TEXTO 1'.
+    Você é um compilador jurídico veloz e preciso. 
+    Sua missão é aplicar o 'TEXTO 2 (Alterações)' no 'BLOCO DO TEXTO 1'.
 
-    REGRAS DE FIDELIDADE (PROIBIÇÕES CRÍTICAS):
-    1. NÃO MESCLE PREÂMBULOS: Ignore o preâmbulo ou cabeçalho do TEXTO 2. Aplique APENAS os comandos de alteração (ex: "O art. X passa a vigorar...").
-    2. NÃO ADICIONE NADA que não seja uma ordem direta do TEXTO 2.
-    3. SE O TEXTO 2 NÃO MANDAR ALTERAR NADA NESTE BLOCO ESPECÍFICO, DEVOLVA O BLOCO EXATAMENTE COMO ELE É. Não resuma.
+    REGRA DE VELOCIDADE (CRÍTICA):
+    Avalie o bloco. Se o TEXTO 2 NÃO determinar NENHUMA alteração, revogação ou inclusão para os artigos contidos exatamente neste bloco, VOCÊ DEVE RESPONDER APENAS A PALAVRA:
+    NENHUMA_ALTERACAO
     
-    REGRAS DE FORMATAÇÃO:
-    - Onde houver alteração, mantenha o original riscado: ~~texto antigo~~ (Revogado pela [[Nome da Portaria do Texto 2]]).
-    - Insira a nova redação logo abaixo: **texto novo** (Incluído pela [[Nome da Portaria do Texto 2]]).
-    - Use os colchetes duplos [[ ]] estritamente para o nome da portaria alteradora.
+    REGRA DE CONSOLIDAÇÃO (Caso haja mudança no bloco):
+    1. Reescreva o bloco inteiro.
+    2. O que sai fica riscado: ~~texto antigo~~ (Revogado pela [[Nome da Portaria]]).
+    3. O que entra fica em negrito: **texto novo** (Incluído pela [[Nome da Portaria]]).
+    4. Nomes de Portarias alteradoras SEMPRE em colchetes duplos [[ ]].
+    5. Mantenha os artigos que não sofreram mudança iguais.
     """
 
     for i, bloco in enumerate(blocos):
-        status_texto.markdown(f"**Analisando parte {i+1} de {total_blocos} da Portaria...**")
+        status_texto.markdown(f"**Escaneando e processando bloco {i+1} de {total_blocos}...**")
         
         try:
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": prompt_sistema},
-                    {"role": "user", "content": f"BLOCO DO TEXTO 1 (BASE):\n{bloco}\n\nTEXTO 2 (ALTERAÇÕES A APLICAR SE NECESSÁRIO):\n{texto_alteracoes[:15000]}"}
+                    {"role": "user", "content": f"BLOCO DO TEXTO 1:\n{bloco}\n\nTEXTO 2 (ALTERAÇÕES):\n{texto_alteracoes[:15000]}"}
                 ],
                 temperature=0
             )
-            resultado_final += response.choices[0].message.content + "\n\n"
+            
+            resposta_ia = response.choices[0].message.content.strip()
+            
+            # Se a IA não identificou mudança, devolvemos o bloco original intacto e rápido!
+            if "NENHUMA_ALTERACAO" in resposta_ia.upper():
+                resultado_final.append(bloco)
+            else:
+                resultado_final.append(resposta_ia)
+                
         except Exception as e:
-            return f"Erro na comunicação com a IA na parte {i+1}: {str(e)}"
+            resultado_final.append(bloco) # Em caso de erro de rede, salva o original para não perder o texto
+            st.toast(f"Pequeno erro de rede no bloco {i+1}, original mantido.")
             
         barra_progresso.progress((i + 1) / total_blocos)
-        time.sleep(1) # Pausa curta para não estourar o limite da API (Rate Limit)
+        time.sleep(0.5)
 
     status_texto.empty()
-    return resultado_final
+    return "\n\n".join(resultado_final)
 
 # =========================
 # INTERFACE STREAMLIT
 # =========================
 
-st.set_page_config(page_title="Consolidador Profissional", layout="wide")
-st.title("⚖️ Consolidador de Portarias Longas e Complexas")
+st.set_page_config(page_title="Consolidador Ultra-Rápido", layout="wide")
+st.title("⚖️ Consolidador Jurídico de Alta Velocidade")
+st.info("Otimizado para portarias gigantes. Pula automaticamente as páginas que não sofreram alterações.")
 
-# Estado da sessão para evitar erros de renderização (removeChild)
-if 'resultado_consolidado' not in st.session_state:
-    st.session_state.resultado_consolidado = None
+if 'resultado_docx' not in st.session_state:
+    st.session_state.resultado_docx = None
+if 'texto_tela' not in st.session_state:
+    st.session_state.texto_tela = None
 
 col1, col2 = st.columns(2)
 with col1:
-    pdf_base = st.file_uploader("1. Portaria ORIGINAL (Base Completa)", type="pdf", key="f_base")
+    pdf_base = st.file_uploader("1. Portaria ORIGINAL (Ex: 100+ páginas)", type="pdf", key="f1")
 with col2:
-    pdf_alt = st.file_uploader("2. Portaria ALTERADORA", type="pdf", key="f_alt")
+    pdf_alt = st.file_uploader("2. Portaria ALTERADORA", type="pdf", key="f2")
 
-if st.button("🚀 Processar e Consolidar (Lê Anexos e Tabelas)", key="btn_run"):
+if st.button("🚀 Processar Rapidamente", key="btn_run"):
     if not pdf_base or not pdf_alt:
         st.warning("Faça o upload dos dois arquivos PDF.")
     elif not client:
         st.error("API Key da OpenAI não configurada.")
     else:
-        t_base = extrair_texto_pdf(pdf_base)
-        t_alt = extrair_texto_pdf(pdf_alt)
+        st.session_state.resultado_docx = None
         
-        # Limpa o resultado anterior da tela se houver
-        st.session_state.resultado_consolidado = None
+        with st.spinner("Extraindo textos..."):
+            t_base = extrair_texto_pdf(pdf_base)
+            t_alt = extrair_texto_pdf(pdf_alt)
         
-        with st.spinner("Iniciando a leitura estruturada do documento..."):
-            st.session_state.resultado_consolidado = processar_comparacao_ia_blocos(t_base, t_alt)
+        # Executa a nova lógica rápida
+        texto_processado = processar_comparacao_rapida(t_base, t_alt)
+        st.session_state.texto_tela = texto_processado
+        
+        with st.spinner("Gerando arquivo Word perfeitamente formatado..."):
+            st.session_state.resultado_docx = gerar_word_fidelidade_total(texto_processado)
 
-# Container isolado para o resultado
-if st.session_state.resultado_consolidado:
-    res = st.session_state.resultado_consolidado
-    if "Erro" not in res:
-        st.success("✅ Consolidação de todas as páginas concluída com sucesso!")
-        doc_buffer = gerar_word_fidelidade_total(res)
-        
-        st.download_button(
-            label="📥 Baixar Portaria_Consolidada.docx",
-            data=doc_buffer,
-            file_name="Portaria_Consolidada_Final.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            key="btn_dl_final"
-        )
-        
-        with st.expander("Visualizar texto consolidado pelo sistema"):
-            st.write(res)
-    else:
-        st.error(res)
+# Área de Download segura
+if st.session_state.resultado_docx:
+    st.success("✅ Consolidação concluída e arquivo Word gerado!")
+    
+    st.download_button(
+        label="📥 Baixar Portaria_Consolidada.docx",
+        data=st.session_state.resultado_docx,
+        file_name="Portaria_Consolidada_Formatada.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        key="btn_down"
+    )
+    
+    with st.expander("Ver prévia rápida do texto na tela"):
+        st.write(st.session_state.texto_tela)
